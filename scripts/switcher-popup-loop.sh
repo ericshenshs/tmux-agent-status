@@ -37,6 +37,12 @@ while true; do
     if [ "$preview_hidden" = "1" ]; then
         W=60
         H=14
+        # [cc] Cap fixed dimensions to client size so tmux doesn't reject
+        # the popup with "width/height too large" on small terminals.
+        client_w=$(tmux display-message -p '#{client_width}' 2>/dev/null || echo 80)
+        client_h=$(tmux display-message -p '#{client_height}' 2>/dev/null || echo 24)
+        [ "$W" -gt "$client_w" ] && W="$client_w"
+        [ "$H" -gt "$client_h" ] && H="$client_h"
     else
         W="75%"
         H="60%"
