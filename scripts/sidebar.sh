@@ -24,6 +24,7 @@ PREVIEW_MODE=0
 cleanup() {
     [ -n "${SELF_PANE:-}" ] && unregister_sidebar_client "$SELF_PANE"
     printf '\033[?1000l\033[?1006l' 2>/dev/null  # disable mouse
+    printf '\033[?7h' 2>/dev/null                # restore autowrap
     tput cnorm 2>/dev/null
     stty echo 2>/dev/null
 }
@@ -49,6 +50,16 @@ RESIZED=0
 trap 'RESIZED=1' WINCH
 
 tput civis  # hide cursor
+# Turn autowrap off (DECAWM). render() sizes the frame to fit exactly -- the
+# viewport is H-2 rows plus a separator and a footer -- but it counts lines,
+# not screen rows, so any line longer than the pane wraps onto an extra row and
+# pushes the frame one row past the bottom. That scrolls the pane, and the
+# spinner coordinates queued by _queue_spinner_target during the same pass are
+# then one row too high: the animation lands on the row *below* each working
+# agent. The footer alone is 51 columns, so every sidebar narrower than that
+# was mislabelling its neighbours. Clipping is the right behaviour here anyway;
+# every line is already truncated to LW with an explicit \n.
+printf '\033[?7l'
 stty -echo 2>/dev/null
 # Enable mouse click tracking (SGR mode) only in sidebar pane mode.
 # In popup/preview mode, skip mouse to avoid event storms.
@@ -824,7 +835,7 @@ render() {
     elif (( SEARCH_ACTIVE )); then
         buf+=" ${DIM}type to filter  ⏎ select  esc cancel${RST}\033[K"
     else
-        buf+=" ${DIM}⏎ select  / search  w wait  p park  m mode  q quit${RST}\033[K"
+        buf+=" ${DIM}⏎/spc focus  / search  w wait  p park  m mode  q quit${RST}\033[K"
     fi
 
     # Flush entire frame at once (no flicker)
@@ -890,6 +901,41 @@ render() {
 }
 
 # ─── Actions ──────────────────────────────────────────────────────
+
+# Moving the cursor displays the target window but keeps the focus in a
+# sidebar, so the list stays drivable. It has to be the *target* window's
+# sidebar, not this one: once the client shows another window this pane is no
+# longer on screen and cannot hold the cursor. The landing sidebar re-syncs its
+# own cursor from the active target (sidebar_active_selection_index), so the
+# next j/k carries on from the row we just moved to.
+#
+# No-op when the target is already displayed -- otherwise every keypress would
+# re-issue a switch, and with window-size "latest" each switch can resize the
+# window and nudge sidebar widths around.
+action_follow() {
+    (( PREVIEW_MODE )) && return
+    (( SEL_COUNT == 0 )) && return
+    local target="${SEL_NAMES[$SELECTED]}" ttype="${SEL_TYPES[$SELECTED]}"
+    [[ -z "$target" ]] && return
+
+    local scope session token
+    scope=$(selection_scope "$target" "$ttype") || return
+    [[ "$scope" == "session" ]] && return
+    session=$(selection_session "$target" "$ttype")
+    token=$(selection_token "$target" "$ttype")
+
+    local want_win cur
+    if [[ "$scope" == "window" ]]; then
+        want_win="${token#w}"
+    else
+        want_win=$(tmux display-message -t "$token" -p '#{window_index}' 2>/dev/null)
+    fi
+    cur=$(tmux display-message -p '#{session_name}'$'\t''#{window_index}' 2>/dev/null)
+    [[ "$cur" == "${session}"$'\t'"${want_win}" ]] && return
+
+    selection_switch_client "$target" "$ttype" sidebar
+}
+
 action_switch() {
     (( SEL_COUNT == 0 )) && return
     local target="${SEL_NAMES[$SELECTED]}"
@@ -1126,8 +1172,8 @@ while true; do
         _handle_escape() {
             read -rsn2 -t 0.1 seq
             case "$seq" in
-                '[A') (( SELECTED > SESS_START )) && ((SELECTED--)); return 0 ;;
-                '[B') (( SELECTED < SEL_COUNT - 1 )) && ((SELECTED++)); return 0 ;;
+                '[A') (( SELECTED > SESS_START )) && { ((SELECTED--)); action_follow; }; return 0 ;;
+                '[B') (( SELECTED < SEL_COUNT - 1 )) && { ((SELECTED++)); action_follow; }; return 0 ;;
                 '[<')
                     # SGR mouse: read "button;x;yM" or "button;x;ym"
                     local mdata="" mc=""
@@ -1140,10 +1186,10 @@ while true; do
                         IFS=';' read -r mb mx my <<< "$mdata"
                         if (( mb == 64 )); then
                             # Scroll up
-                            (( SELECTED > SESS_START )) && ((SELECTED--))
+                            (( SELECTED > SESS_START )) && { ((SELECTED--)); action_follow; }
                         elif (( mb == 65 )); then
                             # Scroll down
-                            (( SELECTED < SEL_COUNT - 1 )) && ((SELECTED++))
+                            (( SELECTED < SEL_COUNT - 1 )) && { ((SELECTED++)); action_follow; }
                         elif (( mb == 0 )); then
                             # Left click — select + switch
                             local clicked="${SCREEN_SEL[$my]:-}"
@@ -1231,14 +1277,14 @@ while true; do
         else
             # Normal mode input handling
             case "$key" in
-                j)  (( SELECTED < SEL_COUNT - 1 )) && ((SELECTED++)) ;;
-                k)  (( SELECTED > SESS_START )) && ((SELECTED--)) ;;
+                j)  (( SELECTED < SEL_COUNT - 1 )) && { ((SELECTED++)); action_follow; } ;;
+                k)  (( SELECTED > SESS_START )) && { ((SELECTED--)); action_follow; } ;;
                 $'\x1b')
                     if ! _handle_escape; then
                         exit 0
                     fi
                     ;;
-                '')  action_switch ;;
+                ''|' ')  action_switch ;;
                 w)   action_wait; NEEDS_COLLECT=1 ;;
                 p)   action_park; NEEDS_COLLECT=1 ;;
                 m)   "$CURRENT_DIR/sidebar-toggle-mode.sh" >/dev/null 2>&1

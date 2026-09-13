@@ -263,6 +263,14 @@ collect_data() {
         sess_agents[$owner]+="${pid_id}:${agent_name}:${pane_status} "
     done
 
+    # KNOWN_AGENTS is an associative array, so the loop above emits panes in
+    # hash order. The status line walks the status files as a glob, i.e. sorted
+    # by pane id, so sort to the same key -- otherwise the two lists agree on
+    # membership but still disagree on order within a session.
+    for key in "${!sess_agents[@]}"; do
+        sess_agents[$key]="$(printf '%s\n' ${sess_agents[$key]} | sort | tr '\n' ' ')"
+    done
+
     # ── 5. Re-derive session state from per-pane statuses ──────
     for sname in "${!sess_agents[@]}"; do
         local cur_st="${sess_state[$sname]}"
@@ -303,44 +311,8 @@ collect_data() {
     done
 
     # ── 5a'. Per-agent status-line list ─────────────────────────
-    # One "name:status" spec per agent, ordered by session name then pane
-    # id so glyph positions in the status bar stay stable across refreshes.
-    # Sessions with detected agent panes contribute one spec per pane;
-    # sessions tracked only at session level (e.g. SSH remotes) contribute
-    # a single generic spec.
-    SUMMARY_AGENTS=()
-    while IFS= read -r sname; do
-        [ -z "$sname" ] && continue
-        local sstate="${sess_state[$sname]}"
-        case "$sstate" in
-            working|wait|done|ask) ;;
-            *) continue ;;
-        esac
-
-        if [ -z "${sess_agents[$sname]:-}" ]; then
-            SUMMARY_AGENTS+=("agent:${sstate}")
-            continue
-        fi
-
-        local ap
-        while IFS= read -r ap; do
-            [ -z "$ap" ] && continue
-            local aname="${ap#*:}"
-            aname="${aname%%:*}"
-            local astatus="${ap#*:}"
-            astatus="${astatus#*:}"
-            # A session-wide wait snoozes every agent in it. Parked panes
-            # stay hidden (matching collect_status_agents in status-line.sh).
-            if [ "$sstate" = "wait" ] && [ "$astatus" != "parked" ]; then
-                astatus="wait"
-            fi
-            case "$astatus" in
-                working|wait|done|ask)
-                    SUMMARY_AGENTS+=("${aname}:${astatus}")
-                    ;;
-            esac
-        done < <(printf '%s\n' ${sess_agents[$sname]} | sort)
-    done < <(printf '%s\n' "${!sess_state[@]}" | sort)
+    # Built further down, from ENTRIES, so the status line and the sidebar
+    # cannot drift apart. See "5a'' " after the SESSIONS section.
 
     # ── 5b. Compute per-session pane counts ─────────────────────
     PANE_COUNTS=()
@@ -639,6 +611,44 @@ collect_data() {
             _emit_session "$entry" "$sname"
         done
     fi
+
+    # ── 5a''. Status-line specs, derived from the rows the sidebar draws ──
+    # These two views used to be built by separate walks -- this one sorted by
+    # session then pane id, the sidebar's grouped by window in _emit_agents --
+    # so the same agent could sit at a different index in each. Deriving the
+    # specs from ENTRIES makes one walk feed both, and the nth glyph is the nth
+    # agent row by construction.
+    SUMMARY_AGENTS=()
+    local _e _t _s _f3 _f4 _f5
+    for _e in "${ENTRIES[@]}"; do
+        IFS='|' read -r _t _s _f3 _f4 _f5 _ <<< "$_e"
+        case "$_t" in
+            S|W)
+                # A session row only contributes a spec when it has no agent
+                # panes of its own -- an SSH remote tracked at session level.
+                # Otherwise its panes speak for it below.
+                [ -n "${sess_agents[$_s]:-}" ] && continue
+                case "$_f3" in
+                    working|wait|done|ask) SUMMARY_AGENTS+=("agent:${_f3}") ;;
+                esac
+                ;;
+            P|Q)
+                # A P row is a leaf agent when field 3 is a real pane id. When
+                # it is w<idx> the row summarises a multi-agent window whose
+                # members follow as Q rows, and counting both would double up.
+                [[ "$_f3" == %* ]] || continue
+                local _st="$_f5"
+                # A session-wide wait snoozes every agent in it; parked panes
+                # keep their own state.
+                if [ "${sess_state[$_s]:-}" = "wait" ] && [ "$_st" != "parked" ]; then
+                    _st="wait"
+                fi
+                case "$_st" in
+                    working|wait|done|ask) SUMMARY_AGENTS+=("${_f4}:${_st}") ;;
+                esac
+                ;;
+        esac
+    done
 
     # ── 9. Clean up dead sessions ────────────────────────────────
     for sf in "$STATUS_DIR"/*.status; do

@@ -203,10 +203,27 @@ selection_includes_current_client() {
     esac
 }
 
+# The sidebar pane of a window, and the first pane that is not one. A window
+# row selects a window, not a pane, so switching to it alone leaves the cursor
+# wherever that window last had it -- which, once every window has a sidebar,
+# is usually the sidebar. Callers use these to say which of the two they want.
+selection_window_sidebar_pane() {
+    tmux list-panes -t "$1" -F '#{pane_id} #{pane_title}' 2>/dev/null \
+        | awk '$2 == "agent-sidebar" { print $1; exit }'
+}
+
+selection_window_agent_pane() {
+    tmux list-panes -t "$1" -F '#{pane_id} #{pane_title}' 2>/dev/null \
+        | awk '$2 != "agent-sidebar" { print $1; exit }'
+}
+
+# focus: "agent" (default) puts the cursor on the window's non-sidebar pane;
+# "sidebar" keeps it on the sidebar, for browsing without leaving the list.
 selection_switch_client() {
     local sel_name="$1"
     local sel_type="$2"
-    local scope session token win_idx
+    local focus="${3:-agent}"
+    local scope session token win_idx target_win pane
     scope=$(selection_scope "$sel_name" "$sel_type") || return 1
     session=$(selection_session "$sel_name" "$sel_type")
     token=$(selection_token "$sel_name" "$sel_type")
@@ -216,14 +233,33 @@ selection_switch_client() {
             win_idx=$(tmux display-message -t "$token" -p "#{window_index}" 2>/dev/null || true)
             tmux switch-client -t "$session" 2>/dev/null
             [ -n "$win_idx" ] && tmux select-window -t "${session}:${win_idx}" 2>/dev/null
-            tmux select-pane -t "$token" 2>/dev/null
+            if [ "$focus" = "sidebar" ] && [ -n "$win_idx" ]; then
+                pane=$(selection_window_sidebar_pane "${session}:${win_idx}")
+                tmux select-pane -t "${pane:-$token}" 2>/dev/null
+            else
+                tmux select-pane -t "$token" 2>/dev/null
+            fi
             ;;
         window)
+            target_win="${session}:${token#w}"
             tmux switch-client -t "$session" 2>/dev/null
-            tmux select-window -t "${session}:${token#w}" 2>/dev/null
+            tmux select-window -t "$target_win" 2>/dev/null
+            if [ "$focus" = "sidebar" ]; then
+                pane=$(selection_window_sidebar_pane "$target_win")
+            else
+                pane=$(selection_window_agent_pane "$target_win")
+            fi
+            if [ -n "$pane" ]; then
+                tmux select-pane -t "$pane" 2>/dev/null
+            fi
             ;;
         session)
             tmux switch-client -t "$session" 2>/dev/null
             ;;
     esac
+    # Every branch ends in a best-effort tmux call, and a window with no
+    # matching pane leaves $pane empty. Callers (next-done-project.sh) run
+    # under set -e, so settle the status explicitly rather than leaking the
+    # last command's.
+    return 0
 }

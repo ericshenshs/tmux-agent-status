@@ -264,7 +264,14 @@ get_pane_status() {
         return
     fi
 
-    get_agent_status "$session"
+    # No status file means no agent ever ran in this pane, so report nothing.
+    # Falling back to the session status here is circular -- the session status
+    # is the *max* over its panes (recompute_session_status), so an untracked
+    # shell would borrow "working" from whichever agent elsewhere in the session
+    # happens to be busy. Callers that do want a session-level fallback apply it
+    # themselves once the whole scope has come back empty: get_window_status
+    # below, and hook-based-switcher.sh:234,261.
+    echo ""
 }
 
 get_window_status() {
